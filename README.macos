@@ -1,0 +1,29 @@
+NOTE: MacOS support is experimental and incomplete.
+
+Be sure you are using a case-sensitive filesystem. Disk Utility can be used
+to create such a disk image.
+
+INSTALL DEPENDENCIES
+--------------------
+
+Ensure macfsevents is installed (it is used in lieu of pyinotify, which uses
+inotify, a Linux-only mechanism):
+
+    pip3 install --user macfsevents
+
+Install binutils, which provides 'objcopy' and 'readelf'. Also install
+util-linux, which provides 'chrpath':
+
+    brew install binutils gnu-tar gpatch util-linux
+    pip3 install --user macfsevents
+
+Symlink the tools into your PATH:
+
+    ln -s /usr/local/opt/gcc/bin/gcc-10 ~/bin/gcc
+    ln -s /usr/local/opt/gpatch/bin/patch ~/bin/patch
+    ln -s /usr/local/opt/gnu-tar/bin/gtar ~/bin/tar
+
+Run bitbake:
+
+    PATH=/usr/local/opt/binutils/bin:/usr/local/opt/util-linux/bin:$PATH \
+        bitbake world

@@ -521,6 +521,10 @@ def check_make_version(sanity_data):
 # More information on installing WSLv2 at:
 # https://docs.microsoft.com/en-us/windows/wsl/wsl2-install
 def check_wsl(d):
+    import sys
+    if sys.platform == 'darwin':
+        return None
+
     with open("/proc/version", "r") as f:
         verdata = f.readlines()
     for l in verdata:

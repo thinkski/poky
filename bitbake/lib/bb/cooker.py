@@ -5,6 +5,7 @@
 # Copyright (C) 2005        Holger Hans Peter Freyther
 # Copyright (C) 2005        ROAD GmbH
 # Copyright (C) 2006 - 2007 Richard Purdie
+# Copyright (C) 2021        Chris Hiszpanski
 #
 # SPDX-License-Identifier: GPL-2.0-only
 #
@@ -23,7 +24,10 @@ from bb import utils, data, parse, event, cache, providers, taskdata, runqueue, 
 import queue
 import signal
 import prserv.serv
-import pyinotify
+if sys.platform == 'darwin':
+    import fsevents
+else:
+    import pyinotify
 import json
 import pickle
 import codecs
@@ -104,6 +108,7 @@ class CookerFeatures(object):
 
 class EventWriter:
     def __init__(self, cooker, eventfile):
+        print('EventWriter init')
         self.file_inited = None
         self.cooker = cooker
         self.eventfile = eventfile
@@ -151,6 +156,7 @@ class BBCooker:
     """
 
     def __init__(self, featureSet=None, idleCallBackRegister=None):
+        print('BBCooker init')
         self.recipecaches = None
         self.eventlog = None
         self.skiplist = {}
@@ -166,27 +172,54 @@ class BBCooker:
         bb.debug(1, "BBCooker starting %s" % time.time())
         sys.stdout.flush()
 
-        self.configwatcher = pyinotify.WatchManager()
-        bb.debug(1, "BBCooker pyinotify1 %s" % time.time())
-        sys.stdout.flush()
+        if sys.platform == 'darwin':
+            print('darwin init')
+            self.configwatcher = fsevents.Observer()
+            bb.debug(1, "BBCooker fsevents1 %s" % time.time())
+            sys.stdout.flush()
 
-        self.configwatcher.bbseen = set()
-        self.configwatcher.bbwatchedfiles = set()
-        self.confignotifier = pyinotify.Notifier(self.configwatcher, self.config_notifications)
-        bb.debug(1, "BBCooker pyinotify2 %s" % time.time())
-        sys.stdout.flush()
-        self.watchmask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE | pyinotify.IN_DELETE | \
-                         pyinotify.IN_DELETE_SELF | pyinotify.IN_MODIFY | pyinotify.IN_MOVE_SELF | \
-                         pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
-        self.watcher = pyinotify.WatchManager()
-        bb.debug(1, "BBCooker pyinotify3 %s" % time.time())
-        sys.stdout.flush()
-        self.watcher.bbseen = set()
-        self.watcher.bbwatchedfiles = set()
-        self.notifier = pyinotify.Notifier(self.watcher, self.notifications)
+            self.configwatcher.bbseen = set()
+            self.configwatcher.bbwatchedfiles = set()
+            self.configwatcher.callback = self.config_notifications
+            bb.debug(1, "BBCooker fsevents2 %s" % time.time())
+            sys.stdout.flush()
+            self.watcher = fsevents.Observer()
+            bb.debug(1, "BBCooker fsevents3 %s" % time.time())
+            sys.stdout.flush()
+            self.watcher.bbseen = set()
+            self.watcher.bbwatchedfiles = set()
+            self.watcher.callback = self.notifications
 
-        bb.debug(1, "BBCooker pyinotify complete %s" % time.time())
-        sys.stdout.flush()
+            bb.debug(1, "BBCooker fsevents complete %s" % time.time())
+            sys.stdout.flush()
+
+            logging.info("ahoy from bitbake")
+
+            self.configwatcher.start()
+            self.watcher.start()
+
+        else:
+            self.configwatcher = pyinotify.WatchManager()
+            bb.debug(1, "BBCooker pyinotify1 %s" % time.time())
+            sys.stdout.flush()
+    
+            self.configwatcher.bbseen = set()
+            self.configwatcher.bbwatchedfiles = set()
+            self.confignotifier = pyinotify.Notifier(self.configwatcher, self.config_notifications)
+            bb.debug(1, "BBCooker pyinotify2 %s" % time.time())
+            sys.stdout.flush()
+            self.watchmask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE | pyinotify.IN_DELETE | \
+                             pyinotify.IN_DELETE_SELF | pyinotify.IN_MODIFY | pyinotify.IN_MOVE_SELF | \
+                             pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
+            self.watcher = pyinotify.WatchManager()
+            bb.debug(1, "BBCooker pyinotify3 %s" % time.time())
+            sys.stdout.flush()
+            self.watcher.bbseen = set()
+            self.watcher.bbwatchedfiles = set()
+            self.notifier = pyinotify.Notifier(self.watcher, self.notifications)
+
+            bb.debug(1, "BBCooker pyinotify complete %s" % time.time())
+            sys.stdout.flush()
 
         # If being called by something like tinfoil, we need to clean cached data
         # which may now be invalid
@@ -238,74 +271,119 @@ class BBCooker:
             self.handlePRServ()
 
     def process_inotify_updates(self):
-        for n in [self.confignotifier, self.notifier]:
-            if n.check_events(timeout=0):
-                # read notified events and enqeue them
-                n.read_events()
-                n.process_events()
+        if sys.platform == 'darwin':
+            pass
+        else:
+            for n in [self.confignotifier, self.notifier]:
+                if n.check_events(timeout=0):
+                    # read notified events and enqeue them
+                    n.read_events()
+                    n.process_events()
 
     def config_notifications(self, event):
-        if event.maskname == "IN_Q_OVERFLOW":
-            bb.warn("inotify event queue overflowed, invalidating caches.")
-            self.parsecache_valid = False
+        if sys.platform == 'darwin':
+            if not event.name in self.configwatcher.bbwatchedfiles:
+                return
+            if not event.name in self.inotify_modified_files:
+                self.inotify_modified_files.append(event.name)
             self.baseconfig_valid = False
-            bb.parse.clear_cache()
-            return
-        if not event.pathname in self.configwatcher.bbwatchedfiles:
-            return
-        if not event.pathname in self.inotify_modified_files:
-            self.inotify_modified_files.append(event.pathname)
-        self.baseconfig_valid = False
+        else:
+            if event.maskname == "IN_Q_OVERFLOW":
+                bb.warn("inotify event queue overflowed, invalidating caches.")
+                self.parsecache_valid = False
+                self.baseconfig_valid = False
+                bb.parse.clear_cache()
+                return
+            if not event.pathname in self.configwatcher.bbwatchedfiles:
+                return
+            if not event.pathname in self.inotify_modified_files:
+                self.inotify_modified_files.append(event.pathname)
+            self.baseconfig_valid = False
 
     def notifications(self, event):
-        if event.maskname == "IN_Q_OVERFLOW":
-            bb.warn("inotify event queue overflowed, invalidating caches.")
+        if sys.platform == 'darwin':
+            if event.name.endswith("bitbake-cookerdaemon.log") \
+                    or event.name.endswith("bitbake.lock"):
+                return
+            if not event.name in self.inotify_modified_files:
+                self.inotify_modified_files.append(event.name)
             self.parsecache_valid = False
-            bb.parse.clear_cache()
-            return
-        if event.pathname.endswith("bitbake-cookerdaemon.log") \
-                or event.pathname.endswith("bitbake.lock"):
-            return
-        if not event.pathname in self.inotify_modified_files:
-            self.inotify_modified_files.append(event.pathname)
-        self.parsecache_valid = False
+        else:
+            if event.maskname == "IN_Q_OVERFLOW":
+                bb.warn("inotify event queue overflowed, invalidating caches.")
+                self.parsecache_valid = False
+                bb.parse.clear_cache()
+                return
+            if event.pathname.endswith("bitbake-cookerdaemon.log") \
+                    or event.pathname.endswith("bitbake.lock"):
+                return
+            if not event.pathname in self.inotify_modified_files:
+                self.inotify_modified_files.append(event.pathname)
+            self.parsecache_valid = False
 
     def add_filewatch(self, deps, watcher=None, dirs=False):
-        if not watcher:
-            watcher = self.watcher
-        for i in deps:
-            watcher.bbwatchedfiles.add(i[0])
-            if dirs:
-                f = i[0]
-            else:
-                f = os.path.dirname(i[0])
-            if f in watcher.bbseen:
-                continue
-            watcher.bbseen.add(f)
-            watchtarget = None
-            while True:
-                # We try and add watches for files that don't exist but if they did, would influence
-                # the parser. The parent directory of these files may not exist, in which case we need
-                # to watch any parent that does exist for changes.
-                try:
-                    watcher.add_watch(f, self.watchmask, quiet=False)
+        if sys.platform == 'darwin':
+            if not watcher:
+                watcher = self.watcher
+            for i in deps:
+                watcher.bbwatchedfiles.add(i[0])
+                if dirs:
+                    f = i[0]
+                else:
+                    f = os.path.dirname(i[0])
+                if f in watcher.bbseen:
+                    continue
+                watcher.bbseen.add(f)
+                watchtarget = None
+                while True:
+                    # We try and add watches for files that don't exist but if they did, would influence
+                    # the parser. The parent directory of these files may not exist, in which case we need
+                    # to watch any parent that does exist for changes.
+                    stream = fsevents.Stream(watcher.callback, f, file_events=True)
+                    try:
+                        watcher.schedule(stream)
+                    except SystemError:
+                        print(f)
+                        pass
                     if watchtarget:
                         watcher.bbwatchedfiles.add(watchtarget)
                     break
-                except pyinotify.WatchManagerError as e:
-                    if 'ENOENT' in str(e):
-                        watchtarget = f
-                        f = os.path.dirname(f)
-                        if f in watcher.bbseen:
-                            break
-                        watcher.bbseen.add(f)
-                        continue
-                    if 'ENOSPC' in str(e):
-                        providerlog.error("No space left on device or exceeds fs.inotify.max_user_watches?")
-                        providerlog.error("To check max_user_watches: sysctl -n fs.inotify.max_user_watches.")
-                        providerlog.error("To modify max_user_watches: sysctl -n -w fs.inotify.max_user_watches=<value>.")
-                        providerlog.error("Root privilege is required to modify max_user_watches.")
-                    raise
+        else:
+            if not watcher:
+                watcher = self.watcher
+            for i in deps:
+                watcher.bbwatchedfiles.add(i[0])
+                if dirs:
+                    f = i[0]
+                else:
+                    f = os.path.dirname(i[0])
+                if f in watcher.bbseen:
+                    continue
+                watcher.bbseen.add(f)
+                watchtarget = None
+                while True:
+                    # We try and add watches for files that don't exist but if they did, would influence
+                    # the parser. The parent directory of these files may not exist, in which case we need
+                    # to watch any parent that does exist for changes.
+                    try:
+                        watcher.add_watch(f, self.watchmask, quiet=False)
+                        if watchtarget:
+                            watcher.bbwatchedfiles.add(watchtarget)
+                        break
+                    except pyinotify.WatchManagerError as e:
+                        if 'ENOENT' in str(e):
+                            watchtarget = f
+                            f = os.path.dirname(f)
+                            if f in watcher.bbseen:
+                                break
+                            watcher.bbseen.add(f)
+                            continue
+                        if 'ENOSPC' in str(e):
+                            providerlog.error("No space left on device or exceeds fs.inotify.max_user_watches?")
+                            providerlog.error("To check max_user_watches: sysctl -n fs.inotify.max_user_watches.")
+                            providerlog.error("To modify max_user_watches: sysctl -n -w fs.inotify.max_user_watches=<value>.")
+                            providerlog.error("Root privilege is required to modify max_user_watches.")
+                        raise
 
     def sigterm_exception(self, signum, stackframe):
         if signum == signal.SIGTERM:
@@ -391,7 +469,14 @@ class BBCooker:
                 self.hashservaddr = "unix://%s/hashserve.sock" % self.data.getVar("TOPDIR")
                 self.hashserv = hashserv.create_server(self.hashservaddr, dbfile, sync=False)
                 self.hashserv.process = multiprocessing.Process(target=self.hashserv.serve_forever)
-                self.hashserv.process.start()
+                if sys.platform == 'darwin':
+                    # workaround "TypeError: cannot pickle 'sqlite3.Connection' object"
+                    try:
+                        self.hashserv.process.start()
+                    except TypeError:
+                        pass
+                else:
+                    self.hashserv.process.start()
             self.data.setVar("BB_HASHSERVE", self.hashservaddr)
             self.databuilder.origdata.setVar("BB_HASHSERVE", self.hashservaddr)
             self.databuilder.data.setVar("BB_HASHSERVE", self.hashservaddr)
@@ -1701,6 +1786,10 @@ class BBCooker:
             bb.event.fire(CookerExit(), self.data)
 
     def shutdown(self, force = False):
+        if sys.platform == 'darwin':
+            self.configwatcher.stop()
+            self.watcher.stop()
+
         if force:
             self.state = state.forceshutdown
         else:
@@ -2064,6 +2153,7 @@ class Parser(multiprocessing.Process):
 
 class CookerParser(object):
     def __init__(self, cooker, mcfilelist, masked):
+        print('CookerParser init')
         self.mcfilelist = mcfilelist
         self.cooker = cooker
         self.cfgdata = cooker.data
@@ -2126,9 +2216,17 @@ class CookerParser(object):
 
             for i in range(0, self.num_processes):
                 parser = Parser(self.jobs[i], self.result_queue, self.parser_quit, init, self.cooker.configuration.profile)
-                parser.start()
-                self.process_names.append(parser.name)
-                self.processes.append(parser)
+                if sys.platform == 'darwin':
+                    try:
+                        parser.start()
+                        self.process_names.append(parser.name)
+                        self.processes.append(parser)
+                    except AttributeError:
+                        pass
+                else:
+                    parser.start()
+                    self.process_names.append(parser.name)
+                    self.processes.append(parser)
 
             self.results = itertools.chain(self.results, self.parse_generator())
 
